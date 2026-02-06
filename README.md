@@ -1,36 +1,69 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Voice Interview Demo (Next.js App Router)
 
-## Getting Started
+End-to-end demo for:
+- recording interview answers in the browser
+- transcribing recorded audio
+- generating an evidence-linked report from transcript segments
 
-First, run the development server:
+## Requirements
+- Node.js 20+
+- npm 10+
+
+## Setup
+Install dependencies:
+
+```bash
+npm install
+```
+
+Optional: add real OpenAI API access in `.env.local`:
+
+```bash
+OPENAI_API_KEY=your_key_here
+```
+
+Start dev server:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Routes
+- `/` landing page with `Start Interview` and `Review`
+- `/interview` record answers (with auto-stop)
+- `/review` transcribe, generate report, and evidence-link to transcript segments
+- `/api/transcribe` POST multipart (field `audio`)
+- `/api/report` POST JSON report generation
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Force Mock Mode
+Both APIs support `?mock=1` to bypass real OpenAI calls even when `OPENAI_API_KEY` is present.
 
-## Learn More
+Examples:
 
-To learn more about Next.js, take a look at the following resources:
+```bash
+curl -X POST "http://localhost:3000/api/transcribe?mock=1" \
+  -F "audio=@/path/to/sample.wav"
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```bash
+curl -X POST "http://localhost:3000/api/report?mock=1" \
+  -H "Content-Type: application/json" \
+  -d '{"questionId":"1","questionText":"Q","segments":[{"id":"s1","start":0,"end":1,"text":"hello"}],"rubric":{"dimensions":[{"key":"clarity","label":"Clarity","description":"Clear communication"}]}}'
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## 1-Minute Demo Script
+1. Open `/` and click `Start Interview`.
+2. Record one short answer (5-10 seconds) and stop.
+3. Click `Continue to Review`.
+4. On the same question card, click `Transcribe`.
+5. Click `Generate Report`.
+6. Click an evidence chip to auto-scroll to segment, highlight it, and jump audio playback.
+7. Refresh `/review` to show cached transcription/report persistence.
 
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Scripts
+- `npm run dev`
+- `npm run build`
+- `npm run start`
+- `npm run lint`

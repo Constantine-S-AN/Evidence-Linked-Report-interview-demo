@@ -59,6 +59,8 @@ export interface LegacyReportResponseBody {
 }
 
 export type OverallRecommendation = "StrongHire" | "Hire" | "LeanHire" | "LeanNo" | "No";
+export type ReportEvidenceStrength = "weak" | "medium" | "strong";
+export type ReportLevel = "intern" | "newgrad" | "mid" | "senior";
 
 export interface ReportAnchors {
   "1": string;
@@ -71,6 +73,8 @@ export interface ReportAnchors {
 export interface ReportDimensionEvidence {
   segmentId: string;
   quote: string;
+  interpretation: string;
+  strength: ReportEvidenceStrength;
   relevance: number;
 }
 
@@ -104,6 +108,11 @@ export interface ReportCoverageMap {
   bySegment: Record<string, ReportCoverageBySegmentEntry>;
 }
 
+export interface ReportLeveling {
+  role: string;
+  level: ReportLevel;
+}
+
 export interface ReportDimensionAssessment {
   id: string;
   label: string;
@@ -114,6 +123,9 @@ export interface ReportDimensionAssessment {
   missingSignals: string[];
   evidence: ReportDimensionEvidence[];
   evidenceCoverage: ReportEvidenceCoverage;
+  observedSignals?: string[];
+  concerns?: string[];
+  counterSignals?: string[];
   observations?: string[];
   anchorAlignment?: ReportAnchorAlignment;
   evidenceQuality?: number;
@@ -129,6 +141,8 @@ export interface ModernReportResponseBody {
   followUps: string[];
   dimensions: ReportDimensionAssessment[];
   decisionRationale?: string[];
+  leveling?: ReportLeveling;
+  calibrationNotes?: string[];
   keyStrengths?: string[];
   keyRisks?: string[];
   mustFixToHire?: string[];

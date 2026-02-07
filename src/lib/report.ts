@@ -8,8 +8,11 @@ import type {
   ReportDimension,
   ReportDimensionAssessment,
   ReportDimensionEvidence,
+  ReportEvidenceStrength,
   ReportEvidenceCoverage,
   ReportInputSegment,
+  ReportLevel,
+  ReportLeveling,
   ReportRequestBody,
   ReportResponseBody,
   ReportWhatWouldChangeScore,
@@ -24,6 +27,7 @@ const RECOMMENDATIONS = [
 ] as const;
 
 const COVERAGE_EPSILON_SECONDS = 0.05;
+const CORE_DIMENSION_KEYS = new Set(["clarity", "problemSolving", "ownership"]);
 
 interface NormalizeOptions {
   dimensions: ReportDimension[];
@@ -146,6 +150,67 @@ function toRelevance(value: unknown): number | null {
   return clamp(numeric, 0, 1);
 }
 
+function toStrength(value: unknown): ReportEvidenceStrength | null {
+  if (value === "weak" || value === "medium" || value === "strong") {
+    return value;
+  }
+  return null;
+}
+
+function strengthFromRelevance(relevance: number): ReportEvidenceStrength {
+  if (relevance >= 0.75) {
+    return "strong";
+  }
+  if (relevance >= 0.45) {
+    return "medium";
+  }
+  return "weak";
+}
+
+function relevanceFromStrength(strength: ReportEvidenceStrength): number {
+  if (strength === "strong") {
+    return 0.84;
+  }
+  if (strength === "medium") {
+    return 0.62;
+  }
+  return 0.38;
+}
+
+function toMaxWords(text: string, maxWords: number): string {
+  const words = text
+    .trim()
+    .split(/\s+/)
+    .map((word) => word.trim())
+    .filter((word) => word.length > 0);
+
+  if (words.length <= maxWords) {
+    return words.join(" ");
+  }
+  return `${words.slice(0, maxWords).join(" ")}...`;
+}
+
+function recommendationRank(value: OverallRecommendation): number {
+  const order: Record<OverallRecommendation, number> = {
+    No: 0,
+    LeanNo: 1,
+    LeanHire: 2,
+    Hire: 3,
+    StrongHire: 4,
+  };
+  return order[value];
+}
+
+function capRecommendation(
+  value: OverallRecommendation,
+  maxAllowed: OverallRecommendation,
+): OverallRecommendation {
+  if (recommendationRank(value) <= recommendationRank(maxAllowed)) {
+    return value;
+  }
+  return maxAllowed;
+}
+
 function createDefaultAnchors(label: string, description: string): ReportAnchors {
   const base = label.trim().length > 0 ? label.trim() : "the dimension";
   const detail = description.trim().length > 0 ? description.trim() : "the competency";
@@ -178,28 +243,156 @@ function normalizeAnchors(
   };
 }
 
-function deriveRecommendation(scores: Array<number | null>): OverallRecommendation {
-  const observedScores = scores.filter((score): score is number => typeof score === "number");
-  if (observedScores.length === 0) {
-    return "LeanNo";
+function weightForDimension(dimensionKey: string): number {
+  if (dimensionKey === "problemSolving") {
+    return 0.35;
   }
+  if (dimensionKey === "ownership") {
+    return 0.25;
+  }
+  if (dimensionKey === "clarity") {
+    return 0.2;
+  }
+  return 0.2;
+}
 
-  const average =
-    observedScores.reduce((sum, score) => sum + score, 0) / observedScores.length;
-
-  if (average >= 4.5) {
+function baseRecommendationFromWeightedScore(weightedScore: number): OverallRecommendation {
+  if (weightedScore >= 4.5) {
     return "StrongHire";
   }
-  if (average >= 3.8) {
+  if (weightedScore >= 3.8) {
     return "Hire";
   }
-  if (average >= 3.2) {
+  if (weightedScore >= 3.2) {
     return "LeanHire";
   }
-  if (average >= 2.5) {
+  if (weightedScore >= 2.5) {
     return "LeanNo";
   }
   return "No";
+}
+
+function deriveCalibratedRecommendation(
+  dimensions: ReportDimensionAssessment[],
+): {
+  recommendation: OverallRecommendation;
+  weightedScore: number;
+  coverageRatio: number;
+  calibrationNotes: string[];
+} {
+  const observedDimensions = dimensions.filter((dimension) => {
+    return !dimension.notObserved && typeof dimension.score === "number";
+  });
+
+  if (observedDimensions.length === 0) {
+    return {
+      recommendation: "LeanNo",
+      weightedScore: 0,
+      coverageRatio: 0,
+      calibrationNotes: [
+        "No scored dimensions were observed; recommendation is capped to LeanNo.",
+      ],
+    };
+  }
+
+  const weightedTotals = observedDimensions.reduce(
+    (accumulator, dimension) => {
+      const weight = weightForDimension(dimension.id);
+      accumulator.weightedScore += weight * (dimension.score ?? 0);
+      accumulator.weight += weight;
+      return accumulator;
+    },
+    { weightedScore: 0, weight: 0 },
+  );
+  const weightedScore =
+    weightedTotals.weight > 0 ? weightedTotals.weightedScore / weightedTotals.weight : 0;
+  const coverageRatio =
+    dimensions.length > 0
+      ? dimensions
+          .map((dimension) =>
+            dimension.evidenceCoverage.availableSegmentCount > 0
+              ? dimension.evidenceCoverage.citedSegmentCount /
+                dimension.evidenceCoverage.availableSegmentCount
+              : 0,
+          )
+          .reduce((sum, value) => sum + value, 0) / dimensions.length
+      : 0;
+
+  let recommendation = baseRecommendationFromWeightedScore(weightedScore);
+  const calibrationNotes: string[] = [
+    `Weighted score ${weightedScore.toFixed(2)} derived from dimension importance (problem solving and ownership weighted highest).`,
+    `Average evidence coverage ratio is ${(coverageRatio * 100).toFixed(0)}%.`,
+  ];
+
+  const hasCoreNotObserved = dimensions.some((dimension) => {
+    return CORE_DIMENSION_KEYS.has(dimension.id) && (dimension.notObserved || dimension.score === null);
+  });
+  if (hasCoreNotObserved) {
+    recommendation = capRecommendation(recommendation, "LeanHire");
+    calibrationNotes.push(
+      "At least one core dimension is not observed, so recommendation is capped at LeanHire.",
+    );
+  }
+
+  if (coverageRatio < 0.35) {
+    recommendation = capRecommendation(recommendation, "LeanHire");
+    calibrationNotes.push(
+      "Evidence coverage is below 35%, so recommendation is capped at LeanHire.",
+    );
+  }
+
+  const lowScoreCount = dimensions.filter((dimension) => {
+    return typeof dimension.score === "number" && dimension.score <= 2;
+  }).length;
+  if (lowScoreCount >= 2) {
+    recommendation = capRecommendation(recommendation, "LeanNo");
+    calibrationNotes.push(
+      "Multiple dimensions scored at or below 2, so recommendation is capped at LeanNo.",
+    );
+  }
+
+  return {
+    recommendation,
+    weightedScore,
+    coverageRatio,
+    calibrationNotes,
+  };
+}
+
+function deriveLeveling(weightedScore: number): ReportLeveling {
+  let level: ReportLevel = "intern";
+  if (weightedScore >= 4.2) {
+    level = "senior";
+  } else if (weightedScore >= 3.3) {
+    level = "mid";
+  } else if (weightedScore >= 2.6) {
+    level = "newgrad";
+  }
+
+  return {
+    role: "Software Engineer",
+    level,
+  };
+}
+
+function toReportLevel(value: unknown): ReportLevel | null {
+  if (value === "intern" || value === "newgrad" || value === "mid" || value === "senior") {
+    return value;
+  }
+  return null;
+}
+
+function normalizeLeveling(value: unknown, fallback: ReportLeveling): ReportLeveling {
+  if (!isRecord(value)) {
+    return fallback;
+  }
+
+  const role = toNormalizedString(value.role, fallback.role);
+  const level = toReportLevel(value.level) ?? fallback.level;
+  return {
+    role,
+    level,
+  };
 }
 
 function ensureMinItems(
@@ -302,6 +495,7 @@ function normalizeEvidence(
   context: NormalizeContext,
   dimensionIndex: number,
   notObserved: boolean,
+  dimensionLabel: string,
 ): ReportDimensionEvidence[] {
   const result: ReportDimensionEvidence[] = [];
   const seenSegmentIds = new Set<string>();
@@ -321,17 +515,26 @@ function normalizeEvidence(
         continue;
       }
 
+      const rawStrength = toStrength(entry.strength);
       const relevance =
         toRelevance(entry.relevance) ??
         toRelevance(entry.confidence) ??
+        (rawStrength ? relevanceFromStrength(rawStrength) : null) ??
         (notObserved ? 0.45 : 0.7);
+      const strength = rawStrength ?? strengthFromRelevance(relevance);
 
       const fallbackQuote =
-        knownSegment?.text.slice(0, 160) ?? "Evidence excerpt unavailable.";
-      const quote = toNormalizedString(entry.quote, fallbackQuote);
+        toMaxWords(knownSegment?.text ?? "Evidence excerpt unavailable.", 25);
+      const quote = toMaxWords(toNormalizedString(entry.quote, fallbackQuote), 25);
+      const interpretation = toNormalizedString(
+        entry.interpretation,
+        `${dimensionLabel} signal from candidate action and stated outcome in this segment.`,
+      );
       result.push({
         segmentId: rawSegmentId,
         quote,
+        interpretation,
+        strength,
         relevance,
       });
       seenSegmentIds.add(rawSegmentId);
@@ -351,7 +554,9 @@ function normalizeEvidence(
       }
       result.push({
         segmentId: segment.id,
-        quote: segment.text.slice(0, 160),
+        quote: toMaxWords(segment.text, 25),
+        interpretation: `${dimensionLabel} signal grounded in this quoted segment.`,
+        strength: "medium",
         relevance: 0.64,
       });
       seenSegmentIds.add(segment.id);
@@ -472,7 +677,13 @@ function normalizeDimension(
     4,
   );
 
-  const evidence = normalizeEvidence(rawRecord.evidence, context, dimensionIndex, notObserved);
+  const evidence = normalizeEvidence(
+    rawRecord.evidence,
+    context,
+    dimensionIndex,
+    notObserved,
+    descriptor.label,
+  );
   const citedSegmentCount = new Set(evidence.map((entry) => entry.segmentId)).size;
   const evidenceCoverage: ReportEvidenceCoverage = {
     citedSegmentCount,
@@ -525,6 +736,23 @@ function normalizeDimension(
     4,
   );
 
+  const observedSignals = ensureMinItems(
+    toStringArray(rawRecord.observedSignals),
+    observations,
+    2,
+    4,
+  );
+  const concernsFallback = notObserved
+    ? [`Cannot validate ${descriptor.label} from current response.`]
+    : missingSignals.slice(0, 2);
+  const concerns = ensureMinItems(
+    toStringArray(rawRecord.concerns),
+    concernsFallback,
+    1,
+    3,
+  );
+  const counterSignals = toStringArray(rawRecord.counterSignals).slice(0, 3);
+
   const anchorAlignment = normalizeAnchorAlignment(
     rawRecord.anchorAlignment,
     score,
@@ -557,6 +785,9 @@ function normalizeDimension(
     missingSignals,
     evidence,
     evidenceCoverage,
+    observedSignals,
+    concerns,
+    counterSignals,
     observations,
     anchorAlignment,
     evidenceQuality,
@@ -712,17 +943,22 @@ function buildTopLevelArrays(
     "Confidence reflects both breadth of evidence and specificity of cited statements.",
   ];
 
-  const fallbackStrengths = highDimensions.length > 0
-    ? highDimensions.map((dimension) => `${dimension.label}: aligned with higher rubric anchors.`)
-    : ["No clear high-signal strengths were consistently observed."];
+  const fallbackStrengths = [
+    ...highDimensions.map((dimension) => `${dimension.label}: aligned with higher rubric anchors.`),
+    "Candidate communicates decision context and outcomes with interviewer-friendly structure.",
+    "Evidence includes at least one concrete, role-owned action sequence.",
+    "Response shows some consistency across cited segments.",
+  ];
 
-  const fallbackRisks = lowDimensions.length > 0
-    ? lowDimensions.map((dimension) =>
-        dimension.notObserved
-          ? `${dimension.label}: not observed; targeted probing required.`
-          : `${dimension.label}: current evidence does not yet support stronger anchor levels.`,
-      )
-    : ["No critical hiring risks were identified from this response alone."];
+  const fallbackRisks = [
+    ...lowDimensions.map((dimension) =>
+      dimension.notObserved
+        ? `${dimension.label}: not observed; targeted probing required.`
+        : `${dimension.label}: current evidence does not yet support stronger anchor levels.`,
+    ),
+    "Evidence coverage may be insufficient for high-confidence leveling.",
+    "Some claims are directional and would benefit from stronger quantification.",
+  ];
 
   const fallbackFollowUps = dimensions
     .flatMap((dimension) => dimension.probes ?? [])
@@ -734,8 +970,8 @@ function buildTopLevelArrays(
     3,
     5,
   );
-  const keyStrengths = ensureMinItems(toStringArray(report.keyStrengths), fallbackStrengths, 1, 5);
-  const keyRisks = ensureMinItems(toStringArray(report.keyRisks), fallbackRisks, 1, 4);
+  const keyStrengths = ensureMinItems(toStringArray(report.keyStrengths), fallbackStrengths, 3, 5);
+  const keyRisks = ensureMinItems(toStringArray(report.keyRisks), fallbackRisks, 2, 4);
   const followUps = ensureMinItems(toStringArray(report.followUps), fallbackFollowUps, 1, 6);
   const risks = ensureMinItems(toStringArray(report.risks), keyRisks, 1, 6);
 
@@ -786,11 +1022,17 @@ function normalizeModernReport(
     return normalizeDimension(candidate, descriptor, index, context);
   });
 
-  const recommendation =
-    toOverallRecommendation(sourceReport.overallRecommendation) ??
-    deriveRecommendation(normalizedDimensions.map((dimension) => dimension.score));
-
+  const calibration = deriveCalibratedRecommendation(normalizedDimensions);
+  const recommendation = calibration.recommendation;
   const topLevel = buildTopLevelArrays(sourceReport, normalizedDimensions, recommendation);
+  const fallbackLeveling = deriveLeveling(calibration.weightedScore);
+  const leveling = normalizeLeveling(sourceReport.leveling, fallbackLeveling);
+  const calibrationNotes = ensureMinItems(
+    toStringArray(sourceReport.calibrationNotes),
+    calibration.calibrationNotes,
+    2,
+    6,
+  );
   const summary = toNormalizedString(
     sourceReport.overallSummary,
     "Interview response reviewed with anchor-based scoring and evidence-linked notes.",
@@ -808,6 +1050,8 @@ function normalizeModernReport(
     followUps: topLevel.followUps,
     dimensions: normalizedDimensions,
     decisionRationale: topLevel.decisionRationale,
+    leveling,
+    calibrationNotes,
     keyStrengths: topLevel.keyStrengths,
     keyRisks: topLevel.keyRisks,
     mustFixToHire: topLevel.mustFixToHire,
@@ -829,7 +1073,9 @@ function fromLegacyReport(
       const legacyItem = itemByKey.get(descriptor.key);
       const evidenceEntries = legacyItem?.evidence?.map((entry) => ({
         segmentId: entry.segmentId,
-        quote: entry.quote,
+        quote: toMaxWords(entry.quote, 25),
+        interpretation: "Legacy evidence mapped from prior report format.",
+        strength: "medium" as const,
         relevance: toRelevance(entry.confidence) ?? 0.65,
       }));
 
@@ -850,6 +1096,13 @@ function fromLegacyReport(
           citedSegmentCount: evidenceEntries?.length ?? 0,
           availableSegmentCount: context.availableSegmentCount,
         },
+        observedSignals: legacyItem
+          ? [legacyItem.claim, "Legacy score converted to scorecard signals."]
+          : ["No signal observed in legacy report for this dimension.", "Needs follow-up probing."],
+        concerns: legacyItem
+          ? ["Legacy report lacked explicit concerns; added calibration-safe default."]
+          : [`No direct evidence available for ${descriptor.label}.`],
+        counterSignals: [],
         observations: legacyItem
           ? [legacyItem.claim, "Legacy report migrated into anchor-based rubric format."]
           : ["Legacy report had no matching item for this dimension.", "Further probing required."],
@@ -904,6 +1157,15 @@ function createMockDimension(
         citedSegmentCount: 0,
         availableSegmentCount: context.availableSegmentCount,
       },
+      observedSignals: [
+        `No specific statement in transcript demonstrates ${descriptor.label}.`,
+        "Candidate response did not provide enough behavioral detail for this dimension.",
+      ],
+      concerns: [
+        `Core signal for ${descriptor.label} is missing.`,
+        "Recommendation is calibrated downward until this is observed.",
+      ],
+      counterSignals: ["Some adjacent signals appear, but they are too indirect to score."],
       observations: [
         `Current answer does not provide direct behavioral evidence for ${descriptor.label}.`,
         "Interviewer should probe for a specific situation and outcome.",
@@ -927,9 +1189,11 @@ function createMockDimension(
   }
 
   const fallbackSegments = pickFallbackEvidenceSegments(context, dimensionIndex, 2);
-  const evidence = fallbackSegments.map((segment, evidenceIndex) => ({
+  const evidence: ReportDimensionEvidence[] = fallbackSegments.map((segment, evidenceIndex) => ({
     segmentId: segment.id,
-    quote: segment.text.slice(0, 160),
+    quote: toMaxWords(segment.text, 25),
+    interpretation: `${descriptor.label} is supported by concrete action and outcome language in this segment.`,
+    strength: evidenceIndex === 0 ? "strong" : "medium",
     relevance: clamp(0.7 - evidenceIndex * 0.08 + dimensionIndex * 0.03, 0.45, 0.92),
   }));
 
@@ -965,6 +1229,16 @@ function createMockDimension(
       citedSegmentCount,
       availableSegmentCount: context.availableSegmentCount,
     },
+    observedSignals: [
+      `Provides a concrete example that demonstrates ${descriptor.label}.`,
+      "Describes tradeoffs and outcomes with enough specificity for scoring.",
+      "Evidence references candidate-owned actions instead of generic team statements.",
+    ],
+    concerns: [
+      "Could include clearer baseline metrics to strengthen comparability.",
+      "Would benefit from one additional example under stronger constraints.",
+    ],
+    counterSignals: ["Some impact claims remain directional rather than fully quantified."],
     observations: [
       `${descriptor.label} is demonstrated with specific actions in cited transcript segments.`,
       "Reasoning is mostly coherent but could better quantify downstream impact.",
@@ -1008,6 +1282,8 @@ function createMockTopLevel(
   ModernReportResponseBody,
   | "overallSummary"
   | "overallRecommendation"
+  | "leveling"
+  | "calibrationNotes"
   | "risks"
   | "followUps"
   | "decisionRationale"
@@ -1015,11 +1291,19 @@ function createMockTopLevel(
   | "keyRisks"
   | "mustFixToHire"
 > {
-  const recommendation = deriveRecommendation(dimensions.map((dimension) => dimension.score));
+  const calibrated = deriveCalibratedRecommendation(dimensions);
+  const recommendation = calibrated.recommendation;
+  const leveling = deriveLeveling(calibrated.weightedScore);
   const strengths = dimensions
     .filter((dimension) => !dimension.notObserved && (dimension.score ?? 0) >= 4)
     .map((dimension) => `${dimension.label}: evidence supports higher-anchor behavior.`)
     .slice(0, 5);
+  const strengthFallbackPool = [
+    ...strengths,
+    "Candidate provides concrete behavior tied to at least one measurable outcome.",
+    "Evidence includes explicit ownership and decision rationale.",
+    "Communication clarity is sufficient for interviewer calibration.",
+  ];
   const risks = dimensions
     .filter((dimension) => dimension.notObserved || (dimension.score ?? 5) <= 2)
     .map((dimension) =>
@@ -1028,6 +1312,11 @@ function createMockTopLevel(
         : `${dimension.label}: score is currently below hiring bar due to weak evidence.`,
     )
     .slice(0, 4);
+  const riskFallbackPool = [
+    ...risks,
+    "Coverage is not broad enough to remove all uncertainty for final recommendation.",
+    "Some evidence is medium-strength and needs corroboration in follow-up rounds.",
+  ];
   const followUps = dimensions.flatMap((dimension) => dimension.probes ?? []).slice(0, 5);
 
   const mustFixToHire =
@@ -1042,6 +1331,16 @@ function createMockTopLevel(
     overallSummary:
       `Mock hiring-loop summary for "${questionText}": anchored scoring is based on segment-linked evidence and interviewer-style rationale.`,
     overallRecommendation: recommendation,
+    leveling,
+    calibrationNotes: ensureMinItems(
+      calibrated.calibrationNotes,
+      [
+        "Calibration adjusts recommendation when core signals are missing or evidence coverage is thin.",
+        "NotObserved dimensions reduce confidence and cap recommendation.",
+      ],
+      2,
+      6,
+    ),
     risks: ensureMinItems(risks, ["No immediate blockers identified from this single response."], 1, 6),
     followUps: ensureMinItems(
       followUps,
@@ -1050,20 +1349,20 @@ function createMockTopLevel(
       6,
     ),
     decisionRationale: [
-      `Recommendation ${recommendation} is driven by anchor alignment across observed dimensions.`,
+      `Recommendation ${recommendation} is driven by weighted dimension scores and calibration rules.`,
       "Confidence weights evidence quality, cross-segment consistency, and citation coverage.",
       "One dimension is intentionally marked not observed to model realistic interviewer uncertainty.",
     ],
     keyStrengths: ensureMinItems(
-      strengths,
+      strengthFallbackPool,
       ["Response includes at least one concrete, evidence-backed decision narrative."],
-      1,
+      3,
       5,
     ),
     keyRisks: ensureMinItems(
-      risks,
+      riskFallbackPool,
       ["Insufficient behavioral evidence in at least one dimension."],
-      1,
+      2,
       4,
     ),
     mustFixToHire,
@@ -1200,15 +1499,44 @@ function isModernDimensionAssessment(value: unknown): value is ReportDimensionAs
     return false;
   }
 
+  const optionalStringArrays = [
+    value.observedSignals,
+    value.concerns,
+    value.counterSignals,
+    value.observations,
+    value.probes,
+    value.missingSignals,
+  ];
+  const optionalStringArraysValid = optionalStringArrays.every((arrayValue) => {
+    if (arrayValue === undefined) {
+      return true;
+    }
+    if (!Array.isArray(arrayValue)) {
+      return false;
+    }
+    return arrayValue.every((entry) => typeof entry === "string");
+  });
+  if (!optionalStringArraysValid) {
+    return false;
+  }
+
   return value.evidence.every((entry) => {
     if (!isRecord(entry)) {
       return false;
     }
+    const strength = entry.strength;
+    const strengthValid =
+      strength === undefined || strength === "weak" || strength === "medium" || strength === "strong";
+    const relevance = entry.relevance;
+    const relevanceValid =
+      relevance === undefined || (typeof relevance === "number" && Number.isFinite(relevance));
+
     return (
       isNonEmptyString(entry.segmentId) &&
       typeof entry.quote === "string" &&
-      typeof entry.relevance === "number" &&
-      Number.isFinite(entry.relevance)
+      strengthValid &&
+      relevanceValid &&
+      (entry.interpretation === undefined || typeof entry.interpretation === "string")
     );
   });
 }
@@ -1279,6 +1607,9 @@ function isModernReportResponseBody(value: unknown): value is ModernReportRespon
   if (value.decisionRationale !== undefined && !Array.isArray(value.decisionRationale)) {
     return false;
   }
+  if (value.calibrationNotes !== undefined && !Array.isArray(value.calibrationNotes)) {
+    return false;
+  }
   if (value.keyStrengths !== undefined && !Array.isArray(value.keyStrengths)) {
     return false;
   }
@@ -1291,6 +1622,7 @@ function isModernReportResponseBody(value: unknown): value is ModernReportRespon
 
   const optionalArrays = [
     value.decisionRationale,
+    value.calibrationNotes,
     value.keyStrengths,
     value.keyRisks,
     value.mustFixToHire,
@@ -1307,6 +1639,15 @@ function isModernReportResponseBody(value: unknown): value is ModernReportRespon
 
   if (value.coverageMap !== undefined && !isCoverageMap(value.coverageMap)) {
     return false;
+  }
+
+  if (value.leveling !== undefined) {
+    if (!isRecord(value.leveling)) {
+      return false;
+    }
+    if (!isNonEmptyString(value.leveling.role) || toReportLevel(value.leveling.level) === null) {
+      return false;
+    }
   }
 
   return true;
@@ -1375,6 +1716,8 @@ export function createMockReport(requestBody: ReportRequestBody): ModernReportRe
   return {
     overallSummary: topLevel.overallSummary,
     overallRecommendation: topLevel.overallRecommendation,
+    leveling: topLevel.leveling,
+    calibrationNotes: topLevel.calibrationNotes,
     risks: topLevel.risks,
     followUps: topLevel.followUps,
     dimensions,
@@ -1417,6 +1760,21 @@ export function createReportJsonSchema(requestBody: ReportRequestBody): JsonSche
         items: { type: "string" },
         minItems: 3,
         maxItems: 5,
+      },
+      leveling: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          role: { type: "string" },
+          level: { type: "string", enum: ["intern", "newgrad", "mid", "senior"] },
+        },
+        required: ["role", "level"],
+      },
+      calibrationNotes: {
+        type: "array",
+        items: { type: "string" },
+        minItems: 2,
+        maxItems: 6,
       },
       keyStrengths: {
         type: "array",
@@ -1480,6 +1838,24 @@ export function createReportJsonSchema(requestBody: ReportRequestBody): JsonSche
               items: { type: "string" },
               minItems: 1,
               maxItems: 4,
+            },
+            observedSignals: {
+              type: "array",
+              items: { type: "string" },
+              minItems: 2,
+              maxItems: 4,
+            },
+            concerns: {
+              type: "array",
+              items: { type: "string" },
+              minItems: 1,
+              maxItems: 3,
+            },
+            counterSignals: {
+              type: "array",
+              items: { type: "string" },
+              minItems: 0,
+              maxItems: 3,
             },
             observations: {
               type: "array",
@@ -1554,14 +1930,16 @@ export function createReportJsonSchema(requestBody: ReportRequestBody): JsonSche
                     type: "string",
                     enum: segmentIds,
                   },
-                  quote: { type: "string" },
+                  quote: { type: "string", minLength: 1, maxLength: 220 },
+                  interpretation: { type: "string", minLength: 1 },
+                  strength: { type: "string", enum: ["weak", "medium", "strong"] },
                   relevance: {
                     type: "number",
                     minimum: 0,
                     maximum: 1,
                   },
                 },
-                required: ["segmentId", "quote", "relevance"],
+                required: ["segmentId", "quote", "interpretation", "strength", "relevance"],
               },
             },
             evidenceCoverage: {
@@ -1582,6 +1960,9 @@ export function createReportJsonSchema(requestBody: ReportRequestBody): JsonSche
             "confidence",
             "anchors",
             "missingSignals",
+            "observedSignals",
+            "concerns",
+            "counterSignals",
             "observations",
             "anchorAlignment",
             "evidenceQuality",
@@ -1636,6 +2017,8 @@ export function createReportJsonSchema(requestBody: ReportRequestBody): JsonSche
       "risks",
       "followUps",
       "decisionRationale",
+      "leveling",
+      "calibrationNotes",
       "keyStrengths",
       "keyRisks",
       "mustFixToHire",

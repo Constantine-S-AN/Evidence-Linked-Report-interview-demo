@@ -299,7 +299,7 @@ export default function ReviewPage() {
       const segmentIds = new Set(transcription.segments.map((segment) => segment.id));
       const hasInvalidEvidence = normalizedReport.dimensions.some((dimension) => {
         if (dimension.evidence.length === 0) {
-          return true;
+          return !dimension.notObserved;
         }
         return dimension.evidence.some((entry) => !segmentIds.has(entry.segmentId));
       });
@@ -577,7 +577,28 @@ export default function ReviewPage() {
                             {report.overallRecommendation}
                           </span>
                         </p>
+                        {report.leveling ? (
+                          <p className="text-xs text-neutral-700">
+                            Suggested leveling:{" "}
+                            <span className="rounded bg-neutral-100 px-2 py-1 font-medium">
+                              {report.leveling.role} ({report.leveling.level})
+                            </span>
+                          </p>
+                        ) : null}
                       </header>
+
+                      {report.calibrationNotes && report.calibrationNotes.length > 0 ? (
+                        <section className="rounded border border-neutral-200 p-3">
+                          <h4 className="text-xs font-semibold uppercase text-neutral-600">
+                            Calibration Notes
+                          </h4>
+                          <ul className="mt-2 space-y-1 text-sm text-neutral-700">
+                            {report.calibrationNotes.map((note, noteIndex) => (
+                              <li key={`${questionId}-calibration-note-${noteIndex}`}>{note}</li>
+                            ))}
+                          </ul>
+                        </section>
+                      ) : null}
 
                       <div className="grid gap-3 md:grid-cols-2">
                         <section className="rounded border border-neutral-200 p-3">
@@ -764,52 +785,16 @@ export default function ReviewPage() {
                                 </p>
                               </header>
 
-                              <section className="space-y-1">
-                                <p className="text-xs font-semibold uppercase text-neutral-600">
-                                  Observations
-                                </p>
-                                <ul className="space-y-1 text-xs text-neutral-700">
-                                  {(dimension.observations ?? []).map((observation, observationIndex) => (
-                                    <li
-                                      key={`${questionId}-${dimension.id}-observation-${observationIndex}`}
-                                    >
-                                      {observation}
-                                    </li>
-                                  ))}
-                                </ul>
-                              </section>
-
-                              <section className="space-y-1">
-                                <p className="text-xs font-semibold uppercase text-neutral-600">
-                                  Anchored Rubric (1-5)
-                                </p>
-                                <ul className="grid gap-1 text-xs text-neutral-700 md:grid-cols-2">
-                                  {(["1", "2", "3", "4", "5"] as const).map((level) => (
-                                    <li
-                                      className="rounded border border-neutral-200 px-2 py-1"
-                                      key={`${questionId}-${dimension.id}-anchor-${level}`}
-                                    >
-                                      <span className="font-medium">Level {level}:</span>{" "}
-                                      {dimension.anchors[level]}
-                                    </li>
-                                  ))}
-                                </ul>
-                              </section>
-
                               <section className="grid gap-3 md:grid-cols-2">
                                 <div className="space-y-1 rounded border border-neutral-200 p-2">
                                   <p className="text-xs font-semibold uppercase text-neutral-600">
-                                    Anchor Alignment
+                                    Observed Signals
                                   </p>
-                                  <p className="text-xs text-neutral-700">
-                                    Chosen level: {dimension.anchorAlignment?.chosenLevel ?? "n/a"}
-                                  </p>
-                                  <p className="text-xs font-medium text-neutral-700">Why meets</p>
-                                  <ul className="space-y-1 text-xs text-neutral-600">
-                                    {(dimension.anchorAlignment?.whyMeets ?? []).map(
-                                      (item, itemIndex) => (
-                                        <li key={`${questionId}-${dimension.id}-why-meets-${itemIndex}`}>
-                                          {item}
+                                  <ul className="space-y-1 text-xs text-neutral-700">
+                                    {(dimension.observedSignals ?? dimension.observations ?? []).map(
+                                      (signal, signalIndex) => (
+                                        <li key={`${questionId}-${dimension.id}-signal-${signalIndex}`}>
+                                          {signal}
                                         </li>
                                       ),
                                     )}
@@ -817,82 +802,39 @@ export default function ReviewPage() {
                                 </div>
                                 <div className="space-y-1 rounded border border-neutral-200 p-2">
                                   <p className="text-xs font-semibold uppercase text-neutral-600">
-                                    Why Not Higher
+                                    Concerns
                                   </p>
-                                  <ul className="space-y-1 text-xs text-neutral-600">
-                                    {(dimension.anchorAlignment?.whyNotHigher ?? []).map(
-                                      (item, itemIndex) => (
-                                        <li
-                                          key={`${questionId}-${dimension.id}-why-not-higher-${itemIndex}`}
-                                        >
-                                          {item}
+                                  <ul className="space-y-1 text-xs text-neutral-700">
+                                    {(dimension.concerns ?? dimension.missingSignals).map(
+                                      (concern, concernIndex) => (
+                                        <li key={`${questionId}-${dimension.id}-concern-${concernIndex}`}>
+                                          {concern}
                                         </li>
                                       ),
                                     )}
                                   </ul>
+                                  {(dimension.counterSignals ?? []).length > 0 ? (
+                                    <>
+                                      <p className="pt-1 text-xs font-semibold uppercase text-neutral-600">
+                                        Counter Signals
+                                      </p>
+                                      <ul className="space-y-1 text-xs text-neutral-700">
+                                        {(dimension.counterSignals ?? []).map(
+                                          (counterSignal, counterSignalIndex) => (
+                                            <li
+                                              key={`${questionId}-${dimension.id}-counter-${counterSignalIndex}`}
+                                            >
+                                              {counterSignal}
+                                            </li>
+                                          ),
+                                        )}
+                                      </ul>
+                                    </>
+                                  ) : null}
                                 </div>
                               </section>
 
                               <section className="space-y-1">
-                                <p className="text-xs font-semibold uppercase text-neutral-600">
-                                  Missing Signals
-                                </p>
-                                {dimension.missingSignals.length > 0 ? (
-                                  <ul className="space-y-1 text-xs text-neutral-700">
-                                    {dimension.missingSignals.map((signal, signalIndex) => (
-                                      <li key={`${questionId}-${dimension.id}-signal-${signalIndex}`}>
-                                        {signal}
-                                      </li>
-                                    ))}
-                                  </ul>
-                                ) : (
-                                  <p className="text-xs text-neutral-500">
-                                    No major missing signals for this dimension.
-                                  </p>
-                                )}
-                              </section>
-
-                              <section className="space-y-1">
-                                <p className="text-xs font-semibold uppercase text-neutral-600">Probes</p>
-                                <ul className="space-y-1 text-xs text-neutral-700">
-                                  {(dimension.probes ?? []).map((probe, probeIndex) => (
-                                    <li key={`${questionId}-${dimension.id}-probe-${probeIndex}`}>{probe}</li>
-                                  ))}
-                                </ul>
-                              </section>
-
-                              <section className="grid gap-3 md:grid-cols-2">
-                                <div className="space-y-1 rounded border border-neutral-200 p-2">
-                                  <p className="text-xs font-semibold uppercase text-neutral-600">
-                                    To Raise Score
-                                  </p>
-                                  <ul className="space-y-1 text-xs text-neutral-700">
-                                    {(dimension.whatWouldChangeScore?.up ?? []).map(
-                                      (item, itemIndex) => (
-                                        <li key={`${questionId}-${dimension.id}-raise-${itemIndex}`}>
-                                          {item}
-                                        </li>
-                                      ),
-                                    )}
-                                  </ul>
-                                </div>
-                                <div className="space-y-1 rounded border border-neutral-200 p-2">
-                                  <p className="text-xs font-semibold uppercase text-neutral-600">
-                                    To Lower Score
-                                  </p>
-                                  <ul className="space-y-1 text-xs text-neutral-700">
-                                    {(dimension.whatWouldChangeScore?.down ?? []).map(
-                                      (item, itemIndex) => (
-                                        <li key={`${questionId}-${dimension.id}-lower-${itemIndex}`}>
-                                          {item}
-                                        </li>
-                                      ),
-                                    )}
-                                  </ul>
-                                </div>
-                              </section>
-
-                              <section className="space-y-2">
                                 <p className="text-xs font-semibold uppercase text-neutral-600">
                                   Evidence
                                 </p>
@@ -906,22 +848,25 @@ export default function ReviewPage() {
                                       }}
                                       type="button"
                                     >
-                                      {entry.segmentId} ({Math.round(entry.relevance * 100)}%)
+                                      {entry.segmentId} ({entry.strength})
                                     </button>
                                   ))}
                                 </div>
 
                                 {dimension.evidence.length > 0 ? (
-                                  <ul className="space-y-1">
+                                  <div className="space-y-2">
                                     {dimension.evidence.map((entry, entryIndex) => (
-                                      <li
-                                        className="text-xs text-neutral-600"
-                                        key={`${questionId}-${dimension.id}-quote-${entry.segmentId}-${entryIndex}`}
+                                      <article
+                                        className="rounded border border-neutral-200 p-2 text-xs text-neutral-700"
+                                        key={`${questionId}-${dimension.id}-evidence-detail-${entry.segmentId}-${entryIndex}`}
                                       >
-                                        {entry.segmentId}: &quot;{entry.quote}&quot;
-                                      </li>
+                                        <p className="font-medium">
+                                          {entry.segmentId}: &quot;{entry.quote}&quot;
+                                        </p>
+                                        <p className="mt-1 text-neutral-600">{entry.interpretation}</p>
+                                      </article>
                                     ))}
-                                  </ul>
+                                  </div>
                                 ) : (
                                   <p className="text-xs text-neutral-500">
                                     No cited evidence for this dimension.

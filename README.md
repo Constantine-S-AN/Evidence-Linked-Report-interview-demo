@@ -3,7 +3,7 @@
 Next.js (App Router) demo for:
 - browser voice interview recording
 - transcription with segment timestamps
-- evidence-linked report generation
+- recruiter-style evidence-linked report generation
 - clickable evidence that jumps transcript + audio
 
 ## Stack
@@ -44,9 +44,10 @@ Open [http://localhost:3000](http://localhost:3000).
   - per-question playback + delete recording
 - `/review`
   - transcribe per answer
-  - generate evidence-linked report per answer
+  - generate evidence-linked scorecard per answer
   - coverage map + filter by dimension
   - evidence chips scroll/highlight transcript and seek/play audio
+  - scorecard sections: observed signals, concerns, counter-signals, decision rationale, leveling, calibration notes
 
 ## API Routes
 - `POST /api/transcribe`
@@ -57,7 +58,11 @@ Open [http://localhost:3000](http://localhost:3000).
     - `segments[]` with `id/start/end/text`
 - `POST /api/report`
   - request: question + transcript segments + rubric
-  - response: strict JSON report with anchored dimensions, evidence links, recommendation, and coverage map
+  - response: strict JSON scorecard with:
+    - anchored dimensions (`score` or `notObserved`)
+    - evidence entries (`segmentId`, short `quote`, `interpretation`, `strength`)
+    - recommendation + calibration rules
+    - leveling + coverage map
 
 ## Mock Mode
 If `OPENAI_API_KEY` is missing, APIs return deterministic mock data so the demo always works.
@@ -82,6 +87,11 @@ curl -X POST "http://localhost:3000/api/report?mock=1" \
 ## Storage
 - Interview audio is chunk-persisted in IndexedDB (`voice-interview-recordings-db`).
 - Review transcriptions/reports are cached in localStorage (`schemaVersion: 1`) for refresh persistence.
+
+## Scorecard Notes
+- Recommendation is normalized from weighted dimensions and calibration caps.
+- If core dimensions are not observed (or evidence coverage is too low), recommendation is capped (for example, cannot exceed `LeanHire`).
+- Legacy cached reports are still accepted and normalized into the modern scorecard shape.
 
 ## 1-Minute Demo Script
 1. Open `/` and click `Start Interview`.
